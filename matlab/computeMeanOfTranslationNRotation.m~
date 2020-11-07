@@ -1,0 +1,5 @@
+function [r_mean, t_mean] = computeMeanOfTranslationNRotation(rot_v, trans_v)
+    t_mean = mean(trans_v, 1);
+    num_rotation = size(rot_v, 2);
+    
+end

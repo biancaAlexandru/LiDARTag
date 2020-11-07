@@ -1,0 +1,177 @@
+clear, clc
+addpath(genpath("/home/brucebot/workspace/matlab_utils"));
+addpath("/home/brucebot/workspace/lc-calibration/L1_relaxation")
+loadLibraries(2);
+
+dataset = 1;
+tag_size = 1.22;
+
+%% Path
+root_path = "./paper_data/";
+lidar_path = root_path + "lidar/";
+camera_path = root_path + "camera/";
+if dataset == 1
+    prefix = "ccw1-";
+elseif dataset == 2
+    prefix = "front";
+end
+% + lower(prefix)
+lt_estimate_path = "./paper_data/lidartag_estimates/" ;
+lt_estimate_folers = dir(lt_estimate_path + prefix + "*");
+num_estimates = size(lt_estimate_folers, 1);
+
+
+%% Mocap corners
+mocap_corners = [-1231.2, -678.92, -1486.8, -2039.1;
+                    7823,  7674.8,  8384.2,  8532.5;
+                 -1.1026,   -1043, -1562.1, -520.13] ./ 1000;
+
+
+
+%% Load data from txt files
+lidar_files = dir(lidar_path + prefix + "*.txt");
+num_lidar_files = length(lidar_files);
+camera_files = dir(camera_path + prefix + "*.txt");
+num_camera_files = length(camera_files);
+num_data = min(num_lidar_files, num_camera_files);
+
+
+ground_truth(num_data) = struct();
+for i = 1:num_data
+    % find idar file in camera files
+    ground_truth(i).lidar_file = lidar_files(i).name;
+    index = find(strcmp({camera_files.name}, ground_truth(i).lidar_file)==1);
+    
+    ground_truth(i).name = ...
+        ground_truth(i).lidar_file(...
+        1:strfind(ground_truth(i).lidar_file, '.') - 1);
+    
+    % load lidar data
+    lidar_data = ...
+        mean(dlmread(lidar_path + lidar_files(i).name, ',', 1, 0));
+    ground_truth(i).lidar_corners = ...
+        [lidar_data(2:4)', lidar_data(5:7)', ...
+         lidar_data(8:10)', lidar_data(11:13)'];
+    
+    % load camera data
+    ground_truth(i).camera_file = camera_files(index).name;
+    camera_data = ...
+        mean(dlmread(camera_path + ground_truth(i).camera_file, ',', 1, 0));
+    ground_truth(i).camera_corners = [camera_data(2:4)', camera_data(5:7)', ...
+         camera_data(8:10)', camera_data(11:13)'];
+     
+    % assert if names are not the same 
+    assert(...
+        strcmp(ground_truth(i).camera_file, ground_truth(i).lidar_file), "files mismatch")
+    
+    
+    out_t = computePoseFromLiDARToMocapMarkers(...
+        ground_truth(i).lidar_corners, mocap_corners, tag_size);
+    
+    for fn = fieldnames(out_t)'
+       ground_truth(i).(fn{1}) = out_t.(fn{1});
+    end
+end
+
+
+%% Load estimated LiDARTag poses
+
+lidartag(length(num_estimates)) = struct();
+for i = 1:num_estimates
+    lidartag(i).name = prefix + num2str(i);
+    lt_current_path = lt_estimate_path + lidartag(i).name + "/";
+    lidartag(i).folders = dir(lt_current_path + "*1.2*.txt");
+    
+    lidartag(i).estimate_file = dir(lt_current_path + "*1.2*.txt");
+    
+    if isempty(lidartag(i).estimate_file)
+        continue
+    end
+    lidartag(i).raw_data = dlmread(...
+        lt_current_path + lidartag(i).estimate_file.name, ',', 1, 0);
+    
+    
+    [lidartag(i).rotm, lidartag(i).translation] = ...
+        computeMeanOfTranslationNRotation(...
+        lidartag(i).raw_data(:, 7:end), lidartag(i).raw_data(:, 4:6));
+    lidartag(i).L_H_LT = eye(4);
+    lidartag(i).L_H_LT(1:3, 1:3) = lidartag(i).rotm;
+    lidartag(i).L_H_LT(1:3, 4) = lidartag(i).translation;
+    lidartag(i).rpy = ...
+        rad2deg(rotm2eul(lidartag(i).L_H_LT(1:3, 1:3), 'XYZ'));    
+end
+
+
+
+%% Compare with ground truth
+results(num_data) = struct();
+for i = 1:num_estimates
+    if (isempty(lidartag(i).raw_data))
+        continue
+    end
+    
+    index = find(strcmp({ground_truth.name}, lidartag(i).name)==1);
+    if is
+    
+    results(i).dH = ground_truth(index).L_H_LT / lidartag(i).L_H_LT;
+    results(i).translation = ...
+        ground_truth(index).translation - lidartag(i).translation;
+    results(i).rpy = ground_truth(index).rpy - lidartag(i).rpy;
+end
+
+
+
+%% 
+X = ground_truth(1).lidar_corners'; % n x 3
+Y = mocap_corners'; % n x 3
+[~, mocap_at_lidar, ~] = procrustes(X, Y, 'scaling', 0, 'reflection', 0);
+
+template = [0, 0, 0, 0;
+            tag_size/2, -tag_size/2, -tag_size/2 ,tag_size/2;
+            tag_size/2, tag_size/2, -tag_size/2, -tag_size/2]';
+[d, ~, transform] = procrustes(mocap_at_lidar, template, 'scaling', 0, 'reflection', 0);
+H_ML = eye(4);
+H_ML(1:3, 1:3) = transform.T';
+H_ML(1:3, 4) = transform.c(1, :)';
+mocap_lidar = H_ML * convertToHomogeneousCoord(template');
+
+
+
+[axes_h, fig_h] = createFigHandleWithNumber(2, 1, "pose", 1, 1);
+cur_axes = axes_h(1);
+h1 = scatter3(cur_axes, X(:, 1), X(:, 2), X(:, 3), 'ko');
+h2 = scatter3(cur_axes, Y(:, 1), Y(:, 2), Y(:, 3), 'b.'); 
+h3 = scatter3(cur_axes, ...
+    mocap_at_lidar(:, 1), mocap_at_lidar(:, 2), mocap_at_lidar(:, 3), 'rx');
+legend([h1, h2, h3], ...
+      ["L_lidar_corners", "M_mocap_corners", "L_mocap_corners"])
+plotColoredOriginAxisWithText(cur_axes, "LiDAR", eye(4), 0.5)
+showCurrentPlot(cur_axes, "Mocap to LiDAR", [-50, 30])
+
+
+cur_axes = axes_h(2);
+scatter3(cur_axes, ...
+         template(:, 1), template(:, 2), template(:, 3), ...
+         'fill', 'ko')
+scatter3(cur_axes, X(:, 1), X(:, 2), X(:, 3), 'bo')    
+scatter3(cur_axes, mocap_lidar(1, :), mocap_lidar(2, :), mocap_lidar(3, :), 'r*')
+% scatter3(cur_axes, mocap_lidar(:, 1), mocap_lidar(:, 2), mocap_lidar(:, 3), 'r*')
+plotColoredOriginAxisWithText(cur_axes, "LiDAR", eye(4), 0.5)
+showCurrentPlot(cur_axes, "LiDAR", [-70, 10])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
